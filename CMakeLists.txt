@@ -104,10 +104,20 @@ elseif(MSVC)
 endif()
 
 if(LEDA_BUILD_TESTS)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+        message(FATAL_ERROR
+            "LEDA_BUILD_TESTS was enabled, but the local Leda test tree is not present. "
+            "The public repository does not currently ship the development test suite.")
+    endif()
     enable_testing()
     add_subdirectory(tests)
 endif()
 
 if(LEDA_BUILD_EXAMPLES)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt")
+        message(FATAL_ERROR
+            "LEDA_BUILD_EXAMPLES was enabled, but the local Leda example tree is not present. "
+            "The public repository does not currently ship the development examples.")
+    endif()
     add_subdirectory(examples)
 endif()

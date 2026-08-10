@@ -73,10 +73,11 @@ optional<TrainingStepResult> train_update(Leda& model, spar::optim::AdamW& optim
                                           const PretrainingConfig& config) {
   validate_pretraining_config(config);
   auto model_parameters{parameters(model)};
-  if (!ranges::all_of(model_parameters, [&optimizer](const spar::nn::Parameter& parameter) {
+  if (optimizer.parameter_count() != model_parameters.size() ||
+      !ranges::all_of(model_parameters, [&optimizer](const spar::nn::Parameter& parameter) {
         return optimizer.tracks(parameter);
       })) {
-    throw invalid_argument{"AdamW does not track every Leda Parameter"};
+    throw invalid_argument{"AdamW must track exactly the Leda Parameters"};
   }
   if (progress.global_step == numeric_limits<uint64_t>::max()) {
     throw overflow_error{"Leda global_step overflow"};

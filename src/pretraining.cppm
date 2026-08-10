@@ -36,7 +36,9 @@ struct TrainingStepResult final {
 };
 
 /// Executes one Leda optimizer update. Exceptions are fatal for the current run: consumed batches,
-/// tokens_seen, and partial gradients are not transactionally rolled back.
+/// tokens_seen, and partial gradients are not transactionally rolled back. The optimizer must track
+/// exactly the model's unique Parameters; ownership is checked before gradients or data are
+/// mutated.
 [[nodiscard]] std::optional<TrainingStepResult>
 train_update(Leda& model, spar::optim::AdamW& optimizer, spar::data::LMBatchIterator& batches,
              spar::checkpoint::TrainingProgress& progress, const PretrainingConfig& config);
