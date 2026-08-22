@@ -39,8 +39,22 @@ double scalar_value(const spar::Tensor& tensor) {
       (tensor.dtype() != spar::DType::Float32 && tensor.dtype() != spar::DType::Float64)) {
     throw logic_error{"Leda loss must be one floating-point scalar"};
   }
-  return tensor.dtype() == spar::DType::Float32 ? static_cast<double>(tensor.span<float>()[0])
-                                                : tensor.span<double>()[0];
+  const spar::Tensor host{tensor.device().is_cpu() ? tensor : tensor.to(spar::Device::cpu())};
+  return host.dtype() == spar::DType::Float32 ? static_cast<double>(host.span<float>()[0])
+                                              : host.span<double>()[0];
+}
+
+spar::Device model_device(span<spar::nn::Parameter> model_parameters) {
+  if (model_parameters.empty()) {
+    throw logic_error{"Leda model has no Parameters"};
+  }
+  const spar::Device device{model_parameters.front().tensor().device()};
+  if (!ranges::all_of(model_parameters, [device](const spar::nn::Parameter& parameter) {
+        return parameter.tensor().device() == device;
+      })) {
+    throw logic_error{"All Leda Parameters must reside on the same Device"};
+  }
+  return device;
 }
 
 } // namespace
@@ -82,6 +96,7 @@ optional<TrainingStepResult> train_update(Leda& model, spar::optim::AdamW& optim
   if (progress.global_step == numeric_limits<uint64_t>::max()) {
     throw overflow_error{"Leda global_step overflow"};
   }
+  const spar::Device device{model_device(model_parameters)};
   optimizer.zero_grad();
   double summed_loss{0.0};
   uint64_t targets{0};
@@ -96,8 +111,9 @@ optional<TrainingStepResult> train_update(Leda& model, spar::optim::AdamW& optim
       throw invalid_argument{"Leda batch shape does not match PretrainingConfig"};
     }
     const uint64_t batch_targets{target_count(*batch)};
-    spar::Tensor loss{spar::loss::language_model_cross_entropy(model.forward(*batch), *batch,
-                                                               spar::loss::Reduction::Sum)};
+    const spar::Tensor device_batch{batch->device() == device ? *batch : batch->to(device)};
+    spar::Tensor loss{spar::loss::language_model_cross_entropy(
+        model.forward(device_batch), device_batch, spar::loss::Reduction::Sum)};
     summed_loss += scalar_value(loss);
     loss.backward();
     checked_add(targets, batch_targets, "accumulation target count");
@@ -124,13 +140,16 @@ optional<TrainingStepResult> train_update(Leda& model, spar::optim::AdamW& optim
 }
 
 EvaluationResult evaluate(const Leda& model, spar::data::LMBatchIterator& validation_batches) {
+  auto model_parameters{parameters(const_cast<Leda&>(model))};
+  const spar::Device device{model_device(model_parameters)};
   double summed_loss{0.0};
   uint64_t targets{0};
   size_t batch_count{0};
   while (optional<spar::Tensor> batch{validation_batches.next_batch()}) {
     const uint64_t batch_targets{target_count(*batch)};
-    const spar::Tensor loss{spar::loss::language_model_cross_entropy(model.forward(*batch), *batch,
-                                                                     spar::loss::Reduction::Sum)};
+    const spar::Tensor device_batch{batch->device() == device ? *batch : batch->to(device)};
+    const spar::Tensor loss{spar::loss::language_model_cross_entropy(
+        model.forward(device_batch), device_batch, spar::loss::Reduction::Sum)};
     summed_loss += scalar_value(loss);
     checked_add(targets, batch_targets, "evaluation target count");
     ++batch_count;
