@@ -7,6 +7,7 @@ import spar.data.batch_iterator;
 import spar.loss.cross_entropy;
 import spar.nn.parameter;
 import spar.optim.adamw;
+import spar.runtime;
 import spar.training.gradients;
 import spar.training.schedule;
 
@@ -114,8 +115,8 @@ optional<TrainingStepResult> train_update(Leda& model, spar::optim::AdamW& optim
     const spar::Tensor device_batch{batch->device() == device ? *batch : batch->to(device)};
     spar::Tensor loss{spar::loss::language_model_cross_entropy(
         model.forward(device_batch), device_batch, spar::loss::Reduction::Sum)};
-    summed_loss += scalar_value(loss);
     loss.backward();
+    summed_loss += scalar_value(loss);
     checked_add(targets, batch_targets, "accumulation target count");
     checked_add(progress.tokens_seen, batch_targets, "tokens_seen");
   }
@@ -129,6 +130,7 @@ optional<TrainingStepResult> train_update(Leda& model, spar::optim::AdamW& optim
       spar::training::warmup_cosine_learning_rate(config.learning_rate, progress.global_step)};
   optimizer.set_learning_rate(learning_rate);
   optimizer.step();
+  spar::synchronize(device);
   ++progress.global_step;
   return TrainingStepResult{.mean_loss = summed_loss / static_cast<double>(targets),
                             .target_count = targets,
