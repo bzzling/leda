@@ -158,11 +158,22 @@ def run_summary(directory: pathlib.Path, warmup: int) -> dict:
     timed = [row for row in trained if int(row["step"]) > warmup]
     update_ms = [float(row["update_ms"]) for row in timed]
     gradients = [float(row["gradient_norm"]) for row in trained]
-    validations = [
-        {"step": int(row["step"]), "tokens": int(row["tokens_seen"]), "loss": float(row["validation_mean_loss"])}
-        for row in rows
-        if finite_float(row["validation_mean_loss"]) is not None
-    ]
+    validations = []
+    cumulative_update_seconds = 0.0
+    for row in rows:
+        cumulative_update_seconds += float(row["update_ms"]) / 1000.0
+        validation_loss = finite_float(row["validation_mean_loss"])
+        if validation_loss is None:
+            continue
+        validations.append(
+            {
+                "step": int(row["step"]),
+                "tokens": int(row["tokens_seen"]),
+                "train_loss": finite_float(row["train_mean_loss"]),
+                "loss": validation_loss,
+                "cumulative_gpu_update_seconds": cumulative_update_seconds,
+            }
+        )
     validation_uncertainty = []
     for item in validations:
         path = directory / f"validation-{item['step']}.csv"
