@@ -19,6 +19,9 @@ struct RunSpec final {
   std::string raw;
   std::string spar_commit;
   std::string leda_commit;
+  std::string corpus_fingerprint;
+  std::string tokenizer_sha256;
+  std::string run_spec_payload_sha256;
   std::filesystem::path train_manifest;
   std::string train_manifest_sha256;
   std::filesystem::path validation_manifest;
@@ -42,11 +45,12 @@ struct RestoredState final {
   std::uint64_t global_step;
   std::uint64_t tokens_seen;
   std::uint64_t next_batch_hash;
+  double cumulative_update_ms;
 };
 
 [[noreturn]] void usage() {
-  throw std::invalid_argument{
-      "usage: leda_pretrain_sharded RUN_SPEC RUN_DIR STOP_STEPS (fresh|resume|validate)"};
+  throw std::invalid_argument{"usage: leda_pretrain_sharded RUN_SPEC RUN_DIR "
+                              "STOP_STEPS (fresh|resume|validate)"};
 }
 
 std::uint64_t parse_u64(std::string_view text, std::string_view name, bool allow_zero = false) {
@@ -116,6 +120,12 @@ std::vector<std::uint64_t> parse_steps(std::string_view text, std::string_view n
   return result;
 }
 
+bool is_sha256(std::string_view value) {
+  return value.size() == 64 && std::ranges::all_of(value, [](char character) {
+           return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f');
+         });
+}
+
 RunSpec load_spec(const std::filesystem::path& path) {
   const std::string raw{read_file(path)};
   std::map<std::string, std::string> fields;
@@ -138,9 +148,14 @@ RunSpec load_spec(const std::filesystem::path& path) {
     }
     return found->second;
   };
-  if (value("format") != "LEDA_SCALE_RUN_V1") {
+  const std::string& format{value("format")};
+  if (format != "LEDA_SCALE_RUN_V1" && format != "LEDA_PRETRAIN_RUN_V2") {
     throw std::invalid_argument{"Unsupported Leda run-spec format"};
   }
+  const auto optional_value = [&](std::string_view key, std::string fallback) -> std::string {
+    const auto found{fields.find(std::string{key})};
+    return found == fields.end() ? std::move(fallback) : found->second;
+  };
   const std::size_t vocab{parse_size(value("model_vocab_size"), "model_vocab_size")};
   const std::uint64_t schedule{parse_u64(value("schedule_steps"), "schedule_steps")};
   const std::string& precision{value("precision")};
@@ -151,6 +166,9 @@ RunSpec load_spec(const std::filesystem::path& path) {
       .raw = raw,
       .spar_commit = value("spar_commit"),
       .leda_commit = value("leda_commit"),
+      .corpus_fingerprint = optional_value("corpus_fingerprint", "legacy"),
+      .tokenizer_sha256 = optional_value("tokenizer_sha256", "legacy"),
+      .run_spec_payload_sha256 = optional_value("run_spec_payload_sha256", "legacy"),
       .train_manifest = value("train_manifest"),
       .train_manifest_sha256 = value("train_manifest_sha256"),
       .validation_manifest = value("validation_manifest"),
@@ -190,6 +208,12 @@ RunSpec load_spec(const std::filesystem::path& path) {
       .validation_steps = parse_steps(value("validation_steps"), "validation_steps"),
       .checkpoint_steps = parse_steps(value("checkpoint_steps"), "checkpoint_steps"),
       .save_final = parse_bool(value("save_final"), "save_final")};
+  if (format == "LEDA_PRETRAIN_RUN_V2" &&
+      (!is_sha256(result.corpus_fingerprint) || !is_sha256(result.tokenizer_sha256) ||
+       !is_sha256(result.run_spec_payload_sha256) || !is_sha256(result.train_manifest_sha256) ||
+       !is_sha256(result.validation_manifest_sha256))) {
+    throw std::invalid_argument{"Phase-30 identity fields must be lowercase SHA-256 digests"};
+  }
   static_cast<void>(leda::decoder_config(result.model));
   leda::validate_pretraining_config(result.training);
   const std::uint64_t targets_per_step{
@@ -323,7 +347,10 @@ RestoredState restore_state(const std::filesystem::path& path) {
   RestoredState result{};
   stream >> magic >> version >> result.iterator.epoch >> result.iterator.cursor >>
       result.global_step >> result.tokens_seen >> result.next_batch_hash;
-  if (!stream || magic != "LEDA_RUN_STATE" || version != 3) {
+  if (version == 4) {
+    stream >> result.cumulative_update_ms;
+  }
+  if (!stream || magic != "LEDA_RUN_STATE" || (version != 3 && version != 4)) {
     throw std::runtime_error{"Invalid Leda run-state sidecar"};
   }
   return result;
@@ -334,7 +361,8 @@ void save_boundary(const std::filesystem::path& directory, leda::Leda& model,
                    spar::checkpoint::TrainingProgress progress,
                    spar::data::BatchIteratorState iterator_state,
                    const spar::data::ShardedWindowDataset& dataset,
-                   spar::data::BatchConfig batch_config, spar::Device cuda) {
+                   spar::data::BatchConfig batch_config, spar::Device cuda,
+                   double cumulative_update_ms) {
   const std::string step{std::to_string(progress.global_step)};
   const std::uint64_t next_hash{next_batch_hash(dataset, batch_config, iterator_state)};
   optimizer.zero_grad();
@@ -342,10 +370,11 @@ void save_boundary(const std::filesystem::path& directory, leda::Leda& model,
   spar::checkpoint::save_training_checkpoint(directory / ("checkpoint-" + step + ".sparckpt"),
                                              model.decoder(), optimizer, random, progress);
   std::ostringstream state;
-  state << "LEDA_RUN_STATE 3\n"
+  state << "LEDA_RUN_STATE 4\n"
         << iterator_state.epoch << ' ' << iterator_state.cursor << '\n'
         << progress.global_step << ' ' << progress.tokens_seen << '\n'
-        << next_hash << '\n';
+        << next_hash << '\n'
+        << std::setprecision(17) << cumulative_update_ms << '\n';
   write_atomic(directory / ("state-" + step + ".txt"), state.str());
   write_atomic(directory / "latest.txt", step + "\n");
   optimizer.move_to(cuda);
@@ -392,7 +421,11 @@ ValidationResult evaluate_windows(const leda::Leda& model,
   if (targets == 0) {
     throw std::runtime_error{"Validation corpus contains no targets"};
   }
-  return {total / static_cast<double>(targets), window};
+  const double mean_loss{total / static_cast<double>(targets)};
+  if (!std::isfinite(mean_loss)) {
+    throw std::runtime_error{"Validation produced non-finite loss"};
+  }
+  return {mean_loss, window};
 }
 
 bool contains(std::span<const std::uint64_t> steps, std::uint64_t step) {
@@ -446,12 +479,13 @@ int run(int argc, char** argv) {
   }
   if (args.validate) {
     const auto memory{leda::adamw_memory_estimate(model)};
-    std::println("validated parameters={} persistent_bytes={} train_tokens={} validation_tokens={} "
-                 "windows={} intended_tokens={} precision={}",
+    std::println("validated parameters={} persistent_bytes={} train_tokens={} "
+                 "validation_tokens={} windows={} intended_tokens={} "
+                 "precision={} corpus={} tokenizer={} run_spec={}",
                  statistics.total_parameters, memory.persistent_training_bytes,
                  train_corpus.token_count(), validation_corpus.token_count(),
-                 train_dataset.window_count(), spec.intended_tokens,
-                 precision_name(spec.precision));
+                 train_dataset.window_count(), spec.intended_tokens, precision_name(spec.precision),
+                 spec.corpus_fingerprint, spec.tokenizer_sha256, spec.run_spec_payload_sha256);
     return 0;
   }
   spar::optim::AdamW optimizer{
@@ -460,6 +494,7 @@ int run(int argc, char** argv) {
       spec.training.epsilon,   spec.training.weight_decay};
   spar::checkpoint::TrainingProgress progress{};
   std::uint64_t restored_hash{};
+  double cumulative_update_ms{};
   if (args.resume) {
     const std::string step{latest_step(args.run_directory)};
     auto loaded{spar::checkpoint::load_training_checkpoint(args.run_directory /
@@ -473,6 +508,7 @@ int run(int argc, char** argv) {
     optimizer = std::move(loaded.optimizer);
     random = std::move(loaded.random);
     progress = loaded.progress;
+    cumulative_update_ms = sidecar.cumulative_update_ms;
     batches.set_state(sidecar.iterator);
     restored_hash = next_batch_hash(train_dataset, batch_config, sidecar.iterator);
     if (restored_hash != sidecar.next_batch_hash) {
@@ -489,12 +525,15 @@ int run(int argc, char** argv) {
   std::ofstream log{args.run_directory / "metrics.csv",
                     args.resume ? std::ios::app : std::ios::trunc};
   if (!args.resume) {
-    log << "step,tokens_seen,train_mean_loss,validation_mean_loss,learning_rate,gradient_norm,"
-           "clip_scale,clipped,update_ms,tokens_per_second,validation_ms,host_rss_kib,precision\n";
+    log << "step,tokens_seen,train_mean_loss,validation_mean_loss,learning_"
+           "rate,gradient_norm,"
+           "clip_scale,clipped,update_ms,tokens_per_second,validation_ms,host_"
+           "rss_kib,precision,cumulative_update_s,checkpoint_id,corpus_"
+           "fingerprint,tokenizer_sha256,run_spec_payload_sha256\n";
   }
   const auto log_row = [&](double train_loss, double validation_loss, double learning_rate,
                            double gradient_norm, double clip_scale, bool clipped, double update_ms,
-                           double validation_ms) {
+                           double validation_ms, std::string_view checkpoint_id) {
     const double token_rate{
         update_ms > 0.0
             ? static_cast<double>(spec.training.microbatch_size * spec.training.accumulation_steps *
@@ -504,7 +543,9 @@ int run(int argc, char** argv) {
     log << progress.global_step << ',' << progress.tokens_seen << ',' << train_loss << ','
         << validation_loss << ',' << learning_rate << ',' << gradient_norm << ',' << clip_scale
         << ',' << (clipped ? 1 : 0) << ',' << update_ms << ',' << token_rate << ',' << validation_ms
-        << ',' << resident_kib().value_or(0) << ',' << precision_name(spec.precision) << '\n';
+        << ',' << resident_kib().value_or(0) << ',' << precision_name(spec.precision) << ','
+        << cumulative_update_ms / 1000.0 << ',' << checkpoint_id << ',' << spec.corpus_fingerprint
+        << ',' << spec.tokenizer_sha256 << ',' << spec.run_spec_payload_sha256 << '\n';
     log.flush();
     std::println("step={} tokens={} loss={:.6f} validation={:.6f} lr={:.8f} grad={:.6f} "
                  "clip={:.6f} ms={:.2f} tok_s={:.1f}",
@@ -518,7 +559,7 @@ int run(int argc, char** argv) {
     const double validation_ms{
         std::chrono::duration<double, std::milli>(Clock::now() - validation_started).count()};
     log_row(std::numeric_limits<double>::quiet_NaN(), validation.mean_loss, 0.0,
-            std::numeric_limits<double>::quiet_NaN(), 1.0, false, 0.0, validation_ms);
+            std::numeric_limits<double>::quiet_NaN(), 1.0, false, 0.0, validation_ms, "none");
   }
   while (progress.global_step < args.stop_steps) {
     const auto update_started{Clock::now()};
@@ -527,11 +568,13 @@ int run(int argc, char** argv) {
       batches.next_epoch();
       result = leda::train_update(model, optimizer, batches, progress, spec.training);
     }
-    if (!result || !std::isfinite(result->mean_loss) || !std::isfinite(result->grad_norm)) {
+    if (!result || !std::isfinite(result->mean_loss) || !std::isfinite(result->grad_norm) ||
+        !std::isfinite(result->clip_scale) || !std::isfinite(result->learning_rate)) {
       throw std::runtime_error{"Non-finite or missing Leda training update"};
     }
     const double update_ms{
         std::chrono::duration<double, std::milli>(Clock::now() - update_started).count()};
+    cumulative_update_ms += update_ms;
     double validation_loss{std::numeric_limits<double>::quiet_NaN()};
     double validation_ms{};
     if (contains(spec.validation_steps, progress.global_step)) {
@@ -542,16 +585,20 @@ int run(int argc, char** argv) {
       validation_ms =
           std::chrono::duration<double, std::milli>(Clock::now() - validation_started).count();
     }
+    const bool checkpoint_boundary{contains(spec.checkpoint_steps, progress.global_step) ||
+                                   (spec.save_final && progress.global_step == args.stop_steps)};
+    const std::string checkpoint_id{
+        checkpoint_boundary ? "checkpoint-" + std::to_string(progress.global_step) : "none"};
     log_row(result->mean_loss, validation_loss, result->learning_rate, result->grad_norm,
-            result->clip_scale, result->clipped, update_ms, validation_ms);
-    if (contains(spec.checkpoint_steps, progress.global_step) ||
-        (spec.save_final && progress.global_step == args.stop_steps)) {
+            result->clip_scale, result->clipped, update_ms, validation_ms, checkpoint_id);
+    if (checkpoint_boundary) {
       save_boundary(args.run_directory, model, optimizer, random, progress, batches.state(),
-                    train_dataset, batch_config, cuda);
+                    train_dataset, batch_config, cuda, cumulative_update_ms);
       spar::set_matmul_precision(cuda, spec.precision);
     }
   }
-  std::println("complete steps={} tokens={} elapsed_s={:.3f} parameters={} setup_s={:.3f}",
+  std::println("complete steps={} tokens={} elapsed_s={:.3f} parameters={} "
+               "setup_s={:.3f}",
                progress.global_step, progress.tokens_seen,
                std::chrono::duration<double>(Clock::now() - ready).count(),
                statistics.total_parameters, std::chrono::duration<double>(ready - started).count());

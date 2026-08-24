@@ -6,8 +6,9 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 [[noreturn]] void usage() {
-  throw std::invalid_argument{"usage: leda_train_tokenizer TRAIN_PATHS VALIDATION_PATHS OUTPUT "
-                              "[TARGET_VOCAB=8192] [MAX_TRAINING_BYTES=67108864]"};
+  throw std::invalid_argument{"usage: leda_train_tokenizer STRATIFIED_TRAIN_SAMPLE_PATHS "
+                              "VALIDATION_PATHS OUTPUT [TARGET_VOCAB=8192] "
+                              "[MAX_TRAINING_BYTES=134217728]"};
 }
 
 std::uint64_t parse_positive(std::string_view text, std::string_view name) {
@@ -61,6 +62,23 @@ std::string read_document(const std::filesystem::path& path) {
   return result;
 }
 
+std::optional<std::uint64_t> peak_rss_kib() {
+  std::ifstream stream{"/proc/self/status"};
+  std::string key;
+  while (stream >> key) {
+    if (key == "VmHWM:") {
+      std::uint64_t value{};
+      std::string unit;
+      if (stream >> value >> unit && unit == "kB") {
+        return value;
+      }
+      return std::nullopt;
+    }
+    stream.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+  }
+  return std::nullopt;
+}
+
 std::pair<std::uint64_t, std::uint64_t> measure(const spar::tokenizer::ByteBPETokenizer& tokenizer,
                                                 std::span<const std::filesystem::path> paths) {
   std::uint64_t bytes{};
@@ -96,7 +114,7 @@ int run(int argc, char** argv) {
   const std::filesystem::path output{argv[3]};
   const std::uint64_t target_vocab{argc >= 5 ? parse_positive(argv[4], "TARGET_VOCAB") : 8192};
   const std::uint64_t maximum_bytes{argc >= 6 ? parse_positive(argv[5], "MAX_TRAINING_BYTES")
-                                              : 67'108'864};
+                                              : 134'217'728};
   if (target_vocab > std::numeric_limits<std::size_t>::max()) {
     throw std::overflow_error{"TARGET_VOCAB exceeds size_t"};
   }
@@ -130,9 +148,11 @@ int run(int argc, char** argv) {
   if (sample_bytes == 0 || sample_tokens == 0 || validation_bytes == 0 || validation_tokens == 0) {
     throw std::runtime_error{"Tokenizer evaluation corpus must contain nonempty encoded text"};
   }
+  const auto rss{peak_rss_kib()};
   std::println("training_documents={} training_bytes={} target_vocab={} "
-               "actual_vocab={} wall_s={:.3f}",
-               sample.size(), sample_bytes, target_vocab, tokenizer.vocab_size(), seconds);
+               "actual_vocab={} wall_s={:.3f} peak_rss_kib={}",
+               sample.size(), sample_bytes, target_vocab, tokenizer.vocab_size(), seconds,
+               rss ? std::to_string(*rss) : "unavailable");
   std::println("train_bytes_per_token={:.6f} validation_bytes_per_token={:.6f} "
                "train_compression_vs_bytes={:.6f} "
                "validation_compression_vs_bytes={:.6f}",

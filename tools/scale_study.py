@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import collections
 import csv
+import hashlib
 import json
 import math
 import pathlib
@@ -18,6 +19,12 @@ CANDIDATES = {
     "C": (384, 1152, 12, 6, 2),
     "D": (512, 1536, 12, 8, 2),
 }
+
+
+def sha256_digest(text: str) -> str:
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        raise argparse.ArgumentTypeError("must be a lowercase SHA-256 digest")
+    return text
 
 
 def parameter_count(vocab: int, model: tuple[int, int, int, int, int]) -> int:
@@ -34,18 +41,35 @@ def parameter_count(vocab: int, model: tuple[int, int, int, int, int]) -> int:
 
 
 def make_spec(args: argparse.Namespace) -> None:
+    integer_fields = {
+        "sequence_length": args.sequence_length,
+        "microbatch_size": args.microbatch_size,
+        "accumulation_steps": args.accumulation_steps,
+        "schedule_steps": args.schedule_steps,
+    }
+    if any(value <= 0 for value in integer_fields.values()) or args.sequence_length < 2:
+        raise ValueError("sequence, batch, accumulation, and schedule settings must be positive")
+    if args.maximum_steps is not None and args.maximum_steps <= 0:
+        raise ValueError("maximum steps must be positive")
+    if args.token_budget is not None and args.token_budget <= 0:
+        raise ValueError("token budget must be positive")
     dimension, hidden, layers, query_heads, kv_heads = CANDIDATES[args.model]
     parameters = parameter_count(args.model_vocab_size, CANDIDATES[args.model])
-    intended_tokens = (
-        args.maximum_steps
-        * args.microbatch_size
-        * args.accumulation_steps
-        * (args.sequence_length - 1)
+    tokens_per_update = (
+        args.microbatch_size * args.accumulation_steps * (args.sequence_length - 1)
     )
+    maximum_steps = args.maximum_steps
+    if args.token_budget is not None:
+        maximum_steps = args.token_budget // tokens_per_update
+        if maximum_steps == 0:
+            raise ValueError("token budget is smaller than one complete update")
+    intended_tokens = maximum_steps * tokens_per_update
     fields = [
-        ("format", "LEDA_SCALE_RUN_V1"),
+        ("format", "LEDA_PRETRAIN_RUN_V2"),
         ("spar_commit", args.spar_commit),
         ("leda_commit", args.leda_commit),
+        ("corpus_fingerprint", args.corpus_fingerprint),
+        ("tokenizer_sha256", args.tokenizer_sha256),
         ("train_manifest", args.train_manifest),
         ("train_manifest_sha256", args.train_manifest_sha256),
         ("validation_manifest", args.validation_manifest),
@@ -74,15 +98,84 @@ def make_spec(args: argparse.Namespace) -> None:
         ("weight_decay", args.weight_decay),
         ("shuffle_seed", args.shuffle_seed),
         ("precision", args.precision),
-        ("maximum_steps", args.maximum_steps),
+        ("maximum_steps", maximum_steps),
         ("intended_tokens", intended_tokens),
         ("validation_steps", args.validation_steps),
         ("checkpoint_steps", args.checkpoint_steps),
         ("save_final", int(args.save_final)),
     ]
-    contents = "".join(f"{key}={value}\n" for key, value in fields)
+    payload = "".join(f"{key}={value}\n" for key, value in fields)
+    contents = payload + f"run_spec_payload_sha256={hashlib.sha256(payload.encode()).hexdigest()}\n"
     args.output.write_text(contents, encoding="utf-8")
-    print(json.dumps({"output": str(args.output), "parameters": parameters, "intended_tokens": intended_tokens}))
+    print(
+        json.dumps(
+            {
+                "output": str(args.output),
+                "parameters": parameters,
+                "maximum_steps": maximum_steps,
+                "tokens_per_update": tokens_per_update,
+                "intended_tokens": intended_tokens,
+                "token_budget_unused": (
+                    args.token_budget - intended_tokens if args.token_budget is not None else 0
+                ),
+                "run_spec_sha256": hashlib.sha256(contents.encode()).hexdigest(),
+            }
+        )
+    )
+
+
+def file_sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def validate_spec(args: argparse.Namespace) -> None:
+    contents = args.run_spec.read_bytes()
+    if not contents.endswith(b"\n"):
+        raise ValueError("run spec must end with a newline")
+    lines = contents.splitlines(keepends=True)
+    prefix = b"run_spec_payload_sha256="
+    if not lines[-1].startswith(prefix):
+        raise ValueError("run spec payload digest must be the final field")
+    expected_payload_hash = lines[-1][len(prefix) :].strip().decode()
+    payload = b"".join(lines[:-1])
+    if hashlib.sha256(payload).hexdigest() != expected_payload_hash:
+        raise ValueError("run spec payload SHA-256 mismatch")
+    fields = {}
+    for line in contents.decode().splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or not key or not value or key in fields:
+            raise ValueError("invalid or duplicate run-spec field")
+        fields[key] = value
+    if fields.get("format") != "LEDA_PRETRAIN_RUN_V2":
+        raise ValueError("validate-spec requires a Phase-30 run spec")
+    for field in ("train_manifest", "validation_manifest"):
+        path = pathlib.Path(fields[field])
+        if file_sha256(path) != fields[field + "_sha256"]:
+            raise ValueError(f"{field} SHA-256 mismatch")
+    freeze_record = json.loads(args.corpus_freeze.read_text(encoding="utf-8"))
+    if freeze_record.get("corpus_fingerprint") != fields["corpus_fingerprint"]:
+        raise ValueError("corpus fingerprint conflicts with run spec")
+    tokenizer_hash = file_sha256(args.tokenizer)
+    if tokenizer_hash != fields["tokenizer_sha256"]:
+        raise ValueError("tokenizer SHA-256 conflicts with run spec")
+    if freeze_record.get("tokenizer_sha256") != tokenizer_hash:
+        raise ValueError("tokenizer SHA-256 conflicts with corpus freeze")
+    print(
+        json.dumps(
+            {
+                "run_spec_sha256": hashlib.sha256(contents).hexdigest(),
+                "run_spec_payload_sha256": expected_payload_hash,
+                "corpus_fingerprint": fields["corpus_fingerprint"],
+                "tokenizer_sha256": tokenizer_hash,
+                "intended_tokens": int(fields["intended_tokens"]),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def tokenizer_bias(args: argparse.Namespace) -> None:
@@ -250,10 +343,12 @@ def main() -> None:
     spec.add_argument("--model", choices=sorted(CANDIDATES), required=True)
     spec.add_argument("--spar-commit", required=True)
     spec.add_argument("--leda-commit", required=True)
+    spec.add_argument("--corpus-fingerprint", type=sha256_digest, required=True)
+    spec.add_argument("--tokenizer-sha256", type=sha256_digest, required=True)
     spec.add_argument("--train-manifest", required=True)
-    spec.add_argument("--train-manifest-sha256", required=True)
+    spec.add_argument("--train-manifest-sha256", type=sha256_digest, required=True)
     spec.add_argument("--validation-manifest", required=True)
-    spec.add_argument("--validation-manifest-sha256", required=True)
+    spec.add_argument("--validation-manifest-sha256", type=sha256_digest, required=True)
     spec.add_argument("--tokenizer-vocab-size", type=int, default=8192)
     spec.add_argument("--model-vocab-size", type=int, default=8193)
     spec.add_argument("--seed", type=int, default=2901)
@@ -272,11 +367,18 @@ def main() -> None:
     spec.add_argument("--weight-decay", type=float, default=0.1)
     spec.add_argument("--shuffle-seed", type=int, default=2902)
     spec.add_argument("--precision", choices=("full", "fp16"), required=True)
-    spec.add_argument("--maximum-steps", type=int, required=True)
+    horizon = spec.add_mutually_exclusive_group(required=True)
+    horizon.add_argument("--maximum-steps", type=int)
+    horizon.add_argument("--token-budget", type=int)
     spec.add_argument("--validation-steps", default="none")
     spec.add_argument("--checkpoint-steps", default="none")
     spec.add_argument("--save-final", action="store_true")
     spec.set_defaults(function=make_spec)
+    validate = commands.add_parser("validate-spec")
+    validate.add_argument("run_spec", type=pathlib.Path)
+    validate.add_argument("corpus_freeze", type=pathlib.Path)
+    validate.add_argument("tokenizer", type=pathlib.Path)
+    validate.set_defaults(function=validate_spec)
     args = parser.parse_args()
     args.function(args)
 
