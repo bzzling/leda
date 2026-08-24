@@ -332,6 +332,21 @@ def build(args: argparse.Namespace) -> None:
             if any("\t" in value or "\n" in value for value in values):
                 raise ValueError("Validation TSV fields may not contain tabs or newlines")
             stream.write("\t".join(values) + "\n")
+    with (output / "mixture-documents.tsv").open("w", encoding="utf-8") as stream:
+        stream.write(
+            "split\tsource_family\tbroad_domain\tlicense\tlocal_document_path\n"
+        )
+        for record in sorted(unique, key=lambda item: item["canonical_document_id"]):
+            values = [
+                str(record["split"]),
+                str(record["source_family"]),
+                str(record["broad_domain"]),
+                str(record["license"]),
+                str(record["local_document_path"]),
+            ]
+            if any("\t" in value or "\n" in value for value in values):
+                raise ValueError("Mixture TSV fields may not contain tabs or newlines")
+            stream.write("\t".join(values) + "\n")
     for field in ("broad_domain", "source_family"):
         grouped: dict[str, list[dict]] = collections.defaultdict(list)
         for record in validation_records:
