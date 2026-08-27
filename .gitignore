@@ -3,3 +3,5 @@ build*/
 docs/
 tests/
 examples/
+__pycache__/
+*.pyc

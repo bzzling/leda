@@ -11,8 +11,23 @@ struct Arguments final {
   std::filesystem::path spec_path;
   std::filesystem::path run_directory;
   std::uint64_t stop_steps;
-  bool resume;
-  bool validate;
+  enum class Disposition { Fresh, Branch, Resume, Validate } disposition;
+};
+
+enum class IteratorPolicy { Preserve, ScaleStride };
+
+struct ContinuationSource final {
+  std::filesystem::path checkpoint;
+  std::string checkpoint_sha256;
+  std::filesystem::path state;
+  std::string state_sha256;
+  std::filesystem::path run_spec;
+  std::string run_spec_sha256;
+  std::size_t sequence_length;
+  std::size_t stride;
+  std::uint64_t global_step;
+  std::uint64_t tokens_seen;
+  IteratorPolicy iterator_policy;
 };
 
 struct RunSpec final {
@@ -38,6 +53,7 @@ struct RunSpec final {
   std::vector<std::uint64_t> validation_steps;
   std::vector<std::uint64_t> checkpoint_steps;
   bool save_final;
+  std::optional<ContinuationSource> continuation;
 };
 
 struct RestoredState final {
@@ -50,7 +66,7 @@ struct RestoredState final {
 
 [[noreturn]] void usage() {
   throw std::invalid_argument{"usage: leda_pretrain_sharded RUN_SPEC RUN_DIR "
-                              "STOP_STEPS (fresh|resume|validate)"};
+                              "STOP_STEPS (fresh|branch|resume|validate)"};
 }
 
 std::uint64_t parse_u64(std::string_view text, std::string_view name, bool allow_zero = false) {
@@ -149,7 +165,8 @@ RunSpec load_spec(const std::filesystem::path& path) {
     return found->second;
   };
   const std::string& format{value("format")};
-  if (format != "LEDA_SCALE_RUN_V1" && format != "LEDA_PRETRAIN_RUN_V2") {
+  if (format != "LEDA_SCALE_RUN_V1" && format != "LEDA_PRETRAIN_RUN_V2" &&
+      format != "LEDA_CONTINUATION_RUN_V3") {
     throw std::invalid_argument{"Unsupported Leda run-spec format"};
   }
   const auto optional_value = [&](std::string_view key, std::string fallback) -> std::string {
@@ -207,12 +224,37 @@ RunSpec load_spec(const std::filesystem::path& path) {
       .intended_tokens = parse_u64(value("intended_tokens"), "intended_tokens"),
       .validation_steps = parse_steps(value("validation_steps"), "validation_steps"),
       .checkpoint_steps = parse_steps(value("checkpoint_steps"), "checkpoint_steps"),
-      .save_final = parse_bool(value("save_final"), "save_final")};
-  if (format == "LEDA_PRETRAIN_RUN_V2" &&
+      .save_final = parse_bool(value("save_final"), "save_final"),
+      .continuation = std::nullopt};
+  if ((format == "LEDA_PRETRAIN_RUN_V2" || format == "LEDA_CONTINUATION_RUN_V3") &&
       (!is_sha256(result.corpus_fingerprint) || !is_sha256(result.tokenizer_sha256) ||
        !is_sha256(result.run_spec_payload_sha256) || !is_sha256(result.train_manifest_sha256) ||
        !is_sha256(result.validation_manifest_sha256))) {
-    throw std::invalid_argument{"Phase-30 identity fields must be lowercase SHA-256 digests"};
+    throw std::invalid_argument{"Run identity fields must be lowercase SHA-256 digests"};
+  }
+  if (format == "LEDA_CONTINUATION_RUN_V3") {
+    const std::string& policy{value("iterator_policy")};
+    if (policy != "preserve" && policy != "scale_stride") {
+      throw std::invalid_argument{"iterator_policy must be preserve or scale_stride"};
+    }
+    result.continuation = ContinuationSource{
+        .checkpoint = value("base_checkpoint"),
+        .checkpoint_sha256 = value("base_checkpoint_sha256"),
+        .state = value("base_state"),
+        .state_sha256 = value("base_state_sha256"),
+        .run_spec = value("base_run_spec"),
+        .run_spec_sha256 = value("base_run_spec_sha256"),
+        .sequence_length = parse_size(value("base_sequence_length"), "base_sequence_length"),
+        .stride = parse_size(value("base_stride"), "base_stride"),
+        .global_step = parse_u64(value("base_global_step"), "base_global_step", true),
+        .tokens_seen = parse_u64(value("base_tokens_seen"), "base_tokens_seen", true),
+        .iterator_policy =
+            policy == "preserve" ? IteratorPolicy::Preserve : IteratorPolicy::ScaleStride};
+    if (!is_sha256(result.continuation->checkpoint_sha256) ||
+        !is_sha256(result.continuation->state_sha256) ||
+        !is_sha256(result.continuation->run_spec_sha256)) {
+      throw std::invalid_argument{"Base artifact fields must be lowercase SHA-256 digests"};
+    }
   }
   static_cast<void>(leda::decoder_config(result.model));
   leda::validate_pretraining_config(result.training);
@@ -220,13 +262,22 @@ RunSpec load_spec(const std::filesystem::path& path) {
       static_cast<std::uint64_t>(result.training.microbatch_size) *
       static_cast<std::uint64_t>(result.training.accumulation_steps) *
       static_cast<std::uint64_t>(result.training.sequence_length - 1)};
-  if (result.maximum_steps > std::numeric_limits<std::uint64_t>::max() / targets_per_step ||
-      result.maximum_steps * targets_per_step != result.intended_tokens) {
+  const std::uint64_t first_step{result.continuation ? result.continuation->global_step : 0};
+  const std::uint64_t first_tokens{result.continuation ? result.continuation->tokens_seen : 0};
+  if (result.maximum_steps < first_step ||
+      result.maximum_steps - first_step >
+          (std::numeric_limits<std::uint64_t>::max() - first_tokens) / targets_per_step ||
+      first_tokens + (result.maximum_steps - first_step) * targets_per_step !=
+          result.intended_tokens) {
     throw std::invalid_argument{"intended_tokens does not match the configured maximum run"};
   }
-  if ((!result.validation_steps.empty() && result.validation_steps.back() > result.maximum_steps) ||
-      (!result.checkpoint_steps.empty() && result.checkpoint_steps.back() > result.maximum_steps)) {
-    throw std::invalid_argument{"validation/checkpoint step exceeds maximum_steps"};
+  if ((!result.validation_steps.empty() &&
+       (result.validation_steps.front() < first_step ||
+        result.validation_steps.back() > result.maximum_steps)) ||
+      (!result.checkpoint_steps.empty() &&
+       (result.checkpoint_steps.front() < first_step ||
+        result.checkpoint_steps.back() > result.maximum_steps))) {
+    throw std::invalid_argument{"validation/checkpoint step is outside the configured run"};
   }
   return result;
 }
@@ -236,14 +287,18 @@ Arguments arguments(int argc, char** argv) {
     usage();
   }
   const std::string_view disposition{argv[4]};
-  if (disposition != "fresh" && disposition != "resume" && disposition != "validate") {
+  if (disposition != "fresh" && disposition != "branch" && disposition != "resume" &&
+      disposition != "validate") {
     usage();
   }
+  const Arguments::Disposition parsed{disposition == "fresh"    ? Arguments::Disposition::Fresh
+                                      : disposition == "branch" ? Arguments::Disposition::Branch
+                                      : disposition == "resume" ? Arguments::Disposition::Resume
+                                                                : Arguments::Disposition::Validate};
   return {.spec_path = argv[1],
           .run_directory = argv[2],
           .stop_steps = parse_u64(argv[3], "STOP_STEPS"),
-          .resume = disposition == "resume",
-          .validate = disposition == "validate"};
+          .disposition = parsed};
 }
 
 std::vector<std::filesystem::path> paths(const std::filesystem::path& manifest) {
@@ -435,12 +490,23 @@ bool contains(std::span<const std::uint64_t> steps, std::uint64_t step) {
 int run(int argc, char** argv) {
   const Arguments args{arguments(argc, argv)};
   const RunSpec spec{load_spec(args.spec_path)};
+  const bool branch{args.disposition == Arguments::Disposition::Branch};
+  const bool resume{args.disposition == Arguments::Disposition::Resume};
+  const bool validate{args.disposition == Arguments::Disposition::Validate};
+  if (branch != spec.continuation.has_value()) {
+    if (branch) {
+      throw std::invalid_argument{"branch requires a LEDA_CONTINUATION_RUN_V3 spec"};
+    }
+    if (!resume && !validate) {
+      throw std::invalid_argument{"A continuation spec must begin with branch, not fresh"};
+    }
+  }
   if (args.stop_steps > spec.maximum_steps) {
     throw std::invalid_argument{"STOP_STEPS exceeds the immutable maximum_steps"};
   }
-  if (args.validate) {
+  if (validate) {
     // Validation performs no experiment-directory writes.
-  } else if (args.resume) {
+  } else if (resume) {
     if (read_file(args.run_directory / "run-spec.txt") != spec.raw) {
       throw std::invalid_argument{"Requested run spec conflicts with the stored immutable spec"};
     }
@@ -477,7 +543,7 @@ int run(int argc, char** argv) {
   if (statistics.total_parameters != spec.parameters) {
     throw std::invalid_argument{"Programmatic Parameter count conflicts with the run spec"};
   }
-  if (args.validate) {
+  if (validate) {
     const auto memory{leda::adamw_memory_estimate(model)};
     std::println("validated parameters={} persistent_bytes={} train_tokens={} "
                  "validation_tokens={} windows={} intended_tokens={} "
@@ -495,36 +561,65 @@ int run(int argc, char** argv) {
   spar::checkpoint::TrainingProgress progress{};
   std::uint64_t restored_hash{};
   double cumulative_update_ms{};
-  if (args.resume) {
-    const std::string step{latest_step(args.run_directory)};
-    auto loaded{spar::checkpoint::load_training_checkpoint(args.run_directory /
-                                                           ("checkpoint-" + step + ".sparckpt"))};
-    const RestoredState sidecar{restore_state(args.run_directory / ("state-" + step + ".txt"))};
+  if (branch || resume) {
+    const std::string step{resume ? latest_step(args.run_directory) : std::string{}};
+    const std::filesystem::path checkpoint{resume ? args.run_directory /
+                                                        ("checkpoint-" + step + ".sparckpt")
+                                                  : spec.continuation->checkpoint};
+    const std::filesystem::path state{resume ? args.run_directory / ("state-" + step + ".txt")
+                                             : spec.continuation->state};
+    auto loaded{spar::checkpoint::load_training_checkpoint(checkpoint)};
+    const RestoredState sidecar{restore_state(state)};
     if (loaded.progress.global_step != sidecar.global_step ||
         loaded.progress.tokens_seen != sidecar.tokens_seen) {
       throw std::runtime_error{"Checkpoint and iterator sidecar progress disagree"};
+    }
+    if (branch && (sidecar.global_step != spec.continuation->global_step ||
+                   sidecar.tokens_seen != spec.continuation->tokens_seen)) {
+      throw std::runtime_error{"Base progress conflicts with the immutable continuation spec"};
     }
     model = leda::Leda::from_decoder(spec.model, std::move(loaded.model));
     optimizer = std::move(loaded.optimizer);
     random = std::move(loaded.random);
     progress = loaded.progress;
-    cumulative_update_ms = sidecar.cumulative_update_ms;
-    batches.set_state(sidecar.iterator);
-    restored_hash = next_batch_hash(train_dataset, batch_config, sidecar.iterator);
-    if (restored_hash != sidecar.next_batch_hash) {
-      throw std::runtime_error{"First resumed batch identity does not match the sidecar"};
+    if (optimizer.beta1() != spec.training.beta1 || optimizer.beta2() != spec.training.beta2 ||
+        optimizer.epsilon() != spec.training.epsilon ||
+        optimizer.weight_decay() != spec.training.weight_decay) {
+      throw std::runtime_error{"Base AdamW hyperparameters conflict with the continuation spec"};
     }
-    std::println("resumed step={} tokens={} epoch={} cursor={} next_batch_hash={}",
-                 progress.global_step, progress.tokens_seen, sidecar.iterator.epoch,
-                 sidecar.iterator.cursor, restored_hash);
+    spar::data::BatchIteratorState iterator{sidecar.iterator};
+    if (branch && spec.continuation->iterator_policy == IteratorPolicy::ScaleStride) {
+      if ((iterator.cursor != 0 &&
+           spec.continuation->stride >
+               std::numeric_limits<std::uint64_t>::max() / iterator.cursor) ||
+          iterator.cursor * spec.continuation->stride % spec.training.stride != 0) {
+        throw std::runtime_error{"Base iterator cursor cannot be scaled exactly to the new stride"};
+      }
+      iterator.cursor = iterator.cursor * spec.continuation->stride / spec.training.stride;
+    } else if (branch && (spec.continuation->sequence_length != spec.training.sequence_length ||
+                          spec.continuation->stride != spec.training.stride)) {
+      throw std::runtime_error{"preserve iterator policy requires unchanged sequence and stride"};
+    }
+    batches.set_state(iterator);
+    restored_hash = next_batch_hash(train_dataset, batch_config, iterator);
+    if ((!branch || spec.continuation->iterator_policy == IteratorPolicy::Preserve) &&
+        restored_hash != sidecar.next_batch_hash) {
+      throw std::runtime_error{"First restored batch identity does not match the sidecar"};
+    }
+    cumulative_update_ms = resume ? sidecar.cumulative_update_ms : 0.0;
+    std::println("{} step={} tokens={} epoch={} cursor={} next_batch_hash={}",
+                 branch ? "branched" : "resumed", progress.global_step, progress.tokens_seen,
+                 iterator.epoch, iterator.cursor, restored_hash);
+  }
+  if (args.stop_steps < progress.global_step) {
+    throw std::invalid_argument{"STOP_STEPS precedes the restored global_step"};
   }
   const spar::Device cuda{spar::Device::cuda(0)};
   optimizer.move_to(cuda);
   spar::set_matmul_precision(cuda, spec.precision);
   const auto ready{Clock::now()};
-  std::ofstream log{args.run_directory / "metrics.csv",
-                    args.resume ? std::ios::app : std::ios::trunc};
-  if (!args.resume) {
+  std::ofstream log{args.run_directory / "metrics.csv", resume ? std::ios::app : std::ios::trunc};
+  if (!resume) {
     log << "step,tokens_seen,train_mean_loss,validation_mean_loss,learning_"
            "rate,gradient_norm,"
            "clip_scale,clipped,update_ms,tokens_per_second,validation_ms,host_"
@@ -552,10 +647,11 @@ int run(int argc, char** argv) {
                  progress.global_step, progress.tokens_seen, train_loss, validation_loss,
                  learning_rate, gradient_norm, clip_scale, update_ms, token_rate);
   };
-  if (!args.resume && contains(spec.validation_steps, 0)) {
+  if (!resume && contains(spec.validation_steps, progress.global_step)) {
     const auto validation_started{Clock::now()};
-    const ValidationResult validation{evaluate_windows(
-        model, validation_dataset, spec.training.microbatch_size, 0, args.run_directory)};
+    const ValidationResult validation{evaluate_windows(model, validation_dataset,
+                                                       spec.training.microbatch_size,
+                                                       progress.global_step, args.run_directory)};
     const double validation_ms{
         std::chrono::duration<double, std::milli>(Clock::now() - validation_started).count()};
     log_row(std::numeric_limits<double>::quiet_NaN(), validation.mean_loss, 0.0,
