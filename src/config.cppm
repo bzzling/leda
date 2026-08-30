@@ -33,4 +33,7 @@ struct LedaConfig final {
 [[nodiscard]] LedaConfig leda_small(std::size_t vocab_size,
                                     spar::DType dtype = spar::DType::Float32);
 
+/// Frozen 40,385,024-Parameter Leda Demo v0 inference configuration.
+[[nodiscard]] LedaConfig leda_demo_v0();
+
 } // namespace leda

@@ -87,6 +87,7 @@ target_link_libraries(leda PUBLIC Spar::Spar)
 target_sources(leda
     PRIVATE
         src/config.cpp
+        src/inference.cpp
         src/model.cpp
         src/pretraining.cpp
     PUBLIC
@@ -95,6 +96,7 @@ target_sources(leda
         FILES
             src/leda.cppm
             src/config.cppm
+            src/inference.cppm
             src/model.cppm
             src/pretraining.cppm
 )

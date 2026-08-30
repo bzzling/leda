@@ -95,4 +95,22 @@ LedaConfig leda_small(size_t vocab_size, spar::DType dtype) {
   return config;
 }
 
+LedaConfig leda_demo_v0() {
+  LedaConfig config{.vocab_size = 8193,
+                    .model_dim = 512,
+                    .hidden_dim = 1536,
+                    .num_layers = 12,
+                    .num_query_heads = 8,
+                    .num_kv_heads = 2,
+                    .dtype = spar::DType::Float32,
+                    .qk_norm = true,
+                    .norm_epsilon = 1.0e-5,
+                    .qk_norm_epsilon = 1.0e-6,
+                    .rope_theta = 10000.0,
+                    .attention_bias = false,
+                    .mlp_bias = false};
+  static_cast<void>(decoder_config(config));
+  return config;
+}
+
 } // namespace leda
