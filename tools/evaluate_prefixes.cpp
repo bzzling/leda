@@ -162,9 +162,9 @@ int run(int argc, char** argv) {
   output << "checkpoint_step,checkpoint_tokens,prefix_group,canonical_document_id,broad_domain,"
             "source_family,prefix_tokens,continuation_targets,mean_loss\n";
   const std::array<std::size_t, 5> prefix_lengths{32, 64, 128, 256, 400};
-  std::set<std::string> selected;
   std::size_t examples{};
   for (const std::size_t prefix : prefix_lengths) {
+    std::set<std::string> selected;
     for (const std::string& domain : domains) {
       const Document* chosen{};
       std::vector<spar::tokenizer::TokenId> tokens;

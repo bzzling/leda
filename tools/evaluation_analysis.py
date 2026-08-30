@@ -69,13 +69,17 @@ def documents(args: argparse.Namespace) -> None:
 
 
 def prefixes(args: argparse.Namespace) -> None:
+    stem_counts = collections.Counter(path.stem for path in args.inputs)
     inputs: list[tuple[str, list[dict[str, str]]]] = []
     for path in args.inputs:
         with path.open(newline="", encoding="utf-8") as stream:
             rows = list(csv.DictReader(stream))
         if not rows:
             raise ValueError(f"empty prefix evaluation: {path}")
-        inputs.append((path.stem, rows))
+        name = path.stem
+        if stem_counts[name] > 1:
+            name = f"{path.parent.name}/{name}"
+        inputs.append((name, rows))
     expected = [
         (row["prefix_group"], row["canonical_document_id"], row["broad_domain"])
         for row in inputs[0][1]
