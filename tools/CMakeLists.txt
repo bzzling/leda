@@ -8,11 +8,13 @@ add_executable(leda_complete complete.cpp)
 add_executable(leda_inference_benchmark inference_benchmark.cpp)
 add_executable(leda_evaluate_autocomplete evaluate_autocomplete.cpp)
 add_executable(leda_evaluate_generation evaluate_generation.cpp)
+add_executable(leda_export_web export_web.cpp)
+add_executable(leda_web_reference web_reference.cpp)
 
 foreach(tool IN ITEMS leda_train_tokenizer leda_tokenizer_compare leda_evaluate_documents
                       leda_evaluate_prefixes leda_complete leda_inference_benchmark
-                      leda_evaluate_autocomplete leda_evaluate_generation
-                      leda_pretrain_sharded leda_model_info)
+                      leda_evaluate_autocomplete leda_evaluate_generation leda_export_web
+                      leda_web_reference leda_pretrain_sharded leda_model_info)
     target_compile_features(${tool} PRIVATE cxx_std_23)
     set_target_properties(${tool} PROPERTIES CXX_EXTENSIONS OFF)
 endforeach()
@@ -26,6 +28,8 @@ target_link_libraries(leda_complete PRIVATE Leda::Leda)
 target_link_libraries(leda_inference_benchmark PRIVATE Leda::Leda)
 target_link_libraries(leda_evaluate_autocomplete PRIVATE Leda::Leda)
 target_link_libraries(leda_evaluate_generation PRIVATE Leda::Leda)
+target_link_libraries(leda_export_web PRIVATE Leda::Leda)
+target_link_libraries(leda_web_reference PRIVATE Leda::Leda)
 
 if(SPAR_ENABLE_CUDA)
     find_package(CUDAToolkit REQUIRED)
@@ -36,16 +40,16 @@ endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     foreach(tool IN ITEMS leda_train_tokenizer leda_tokenizer_compare leda_evaluate_documents
                           leda_evaluate_prefixes leda_complete leda_inference_benchmark
-                          leda_evaluate_autocomplete leda_evaluate_generation
-                          leda_pretrain_sharded leda_model_info)
+                          leda_evaluate_autocomplete leda_evaluate_generation leda_export_web
+                          leda_web_reference leda_pretrain_sharded leda_model_info)
         target_compile_options(${tool} PRIVATE
             -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
     endforeach()
 elseif(MSVC)
     foreach(tool IN ITEMS leda_train_tokenizer leda_tokenizer_compare leda_evaluate_documents
                           leda_evaluate_prefixes leda_complete leda_inference_benchmark
-                          leda_evaluate_autocomplete leda_evaluate_generation
-                          leda_pretrain_sharded leda_model_info)
+                          leda_evaluate_autocomplete leda_evaluate_generation leda_export_web
+                          leda_web_reference leda_pretrain_sharded leda_model_info)
         target_compile_options(${tool} PRIVATE /W4 /permissive-)
     endforeach()
 endif()

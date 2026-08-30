@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leda WebGPU runtime diagnostic</title>
+<style>
+  body { font: 15px system-ui; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  textarea { box-sizing: border-box; width: 100%; min-height: 8rem; }
+  button { margin: .75rem .5rem .75rem 0; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f3f3f3; padding: 1rem; }
+</style>
+<h1>Leda WebGPU runtime diagnostic</h1>
+<p>This intentionally plain page is a Phase-34 runtime harness, not the public website.</p>
+<textarea id="prompt">Activation of naïve CD8+ T cells requires</textarea>
+<div><button id="complete" disabled>Complete</button><button id="cancel" disabled>Cancel</button></div>
+<pre id="status">Starting worker…</pre>
+<pre id="output"></pre>
+<script type="module">
+  import { StreamingTokenDecoder } from "/dist/src/tokenizer.js";
+  const status = document.querySelector("#status");
+  const output = document.querySelector("#output");
+  const complete = document.querySelector("#complete");
+  const cancel = document.querySelector("#cancel");
+  const prompt = document.querySelector("#prompt");
+  const worker = new Worker("/dist/src/worker.js", { type: "module" });
+  let requestId = "init";
+  let decoder;
+  let started;
+  let first;
+  worker.onmessage = ({ data }) => {
+    if (data.type === "INIT_PROGRESS") {
+      status.textContent = `${data.stage}${data.receivedBytes ? ` ${data.receivedBytes}/${data.totalBytes ?? "?"}` : ""}`;
+    } else if (data.type === "READY") {
+      status.textContent = `ready\n${JSON.stringify(data.limits, null, 2)}`;
+      complete.disabled = false;
+    } else if (data.type === "TOKEN" && data.requestId === requestId) {
+      first ??= performance.now();
+      output.textContent += decoder.push(new Uint8Array(data.bytes));
+    } else if (data.type === "TOP_CANDIDATES" && data.requestId === requestId) {
+      status.textContent += `\ntop: ${data.candidates.map((item) => `${item.token}:${item.probability.toFixed(4)}`).join(" ")}`;
+    } else if (data.type === "COMPLETE" && data.requestId === requestId) {
+      output.textContent += decoder.finish();
+      const elapsed = performance.now() - started;
+      status.textContent += `\nTTFT ${(first - started).toFixed(1)} ms; total ${elapsed.toFixed(1)} ms; ${(data.generatedTokens.length / elapsed * 1000).toFixed(2)} tok/s`;
+      complete.disabled = false;
+      cancel.disabled = true;
+    } else if (data.type === "CANCELED" && data.requestId === requestId) {
+      status.textContent += "\ncanceled";
+      complete.disabled = false;
+      cancel.disabled = true;
+    } else if (data.type === "ERROR") {
+      status.textContent = `${data.name}: ${data.message}`;
+      complete.disabled = false;
+      cancel.disabled = true;
+    }
+  };
+  worker.postMessage({ type: "INIT", requestId, modelUrl: "/model.ledaweb", tokenizerUrl: "/tokenizer.spartokn" });
+  complete.onclick = () => {
+    requestId = crypto.randomUUID();
+    decoder = new StreamingTokenDecoder();
+    started = performance.now();
+    first = undefined;
+    output.textContent = "";
+    complete.disabled = true;
+    cancel.disabled = false;
+    worker.postMessage({
+      type: "COMPLETE", requestId, prompt: prompt.value,
+      options: { temperature: .7, topK: 50, topP: .9, maxNewTokens: 32, seed: 42 },
+    });
+  };
+  cancel.onclick = () => worker.postMessage({ type: "CANCEL", requestId });
+</script>

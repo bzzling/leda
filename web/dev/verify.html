@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Leda WebGPU numerical verification</title>
+<pre id="result">running</pre>
+<script type="module">
+  const result = document.querySelector("#result");
+  const worker = new Worker("/dist/tests/browser_equivalence.worker.js", { type: "module" });
+  worker.onmessage = ({ data }) => {
+    result.textContent = JSON.stringify(data, null, 2);
+    document.title = data.ok ? "PASS" : "FAIL";
+  };
+  worker.postMessage({ type: "RUN" });
+</script>

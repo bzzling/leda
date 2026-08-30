@@ -68,4 +68,15 @@ tokens. It was selected on validation diagnostics; greedy decoding remains avail
 default because it repeats pathologically. See [the Phase-33 evaluation protocol](docs/phase33_evaluation.md)
 for the exact metric and TEST-freeze procedure.
 
-Current work is local C++ inference and evaluation. There is no website or serving API yet.
+## Client-side WebGPU runtime
+
+The inference-only runtime in [`web/`](web/) executes the frozen Demo-v0 graph directly with our
+own TypeScript controller and WGSL compute shaders. It runs in a Web Worker and uses device-resident
+GQA K/V caches; it does not port Spar's training stack or use a third-party model runtime. A native
+export tool converts the authoritative `SPARCKPT v1` checkpoint into the deterministic,
+model-only `LEDAWEB v1` browser artifact.
+
+This is the Phase-34 runtime and diagnostic harness, not the final website. It requires a secure
+context and a WebGPU-capable browser. Once the immutable runtime, tokenizer, and model assets have
+loaded, generation makes no network requests and prompt text stays in the browser. See
+[the Phase-34 architecture and validation report](docs/phase34_webgpu.md).

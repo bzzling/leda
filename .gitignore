@@ -1,6 +1,6 @@
 .DS_Store
 build*/
-tests/
-examples/
+/tests/
+/examples/
 __pycache__/
 *.pyc

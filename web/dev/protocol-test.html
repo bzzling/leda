@@ -1,0 +1,125 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Leda Web Worker protocol test</title>
+<pre id="result">running</pre>
+<script type="module">
+  const result = document.querySelector("#result");
+  const events = [];
+  const count = async () => await (await fetch("/request-count")).json();
+  const immutableRequests = (value) =>
+    (value.paths["/model.ledaweb"] ?? 0) + (value.paths["/tokenizer.spartokn"] ?? 0);
+  const initWorker = () => new Promise((resolve, reject) => {
+    const worker = new Worker("/dist/src/worker.js", { type: "module" });
+    const progress = [];
+    worker.onmessage = ({ data }) => {
+      events.push(data);
+      if (data.type === "INIT_PROGRESS") progress.push(data);
+      if (data.type === "READY") resolve({ worker, progress });
+      if (data.type === "ERROR") reject(new Error(data.message));
+    };
+    worker.postMessage({
+      type: "INIT", requestId: crypto.randomUUID(),
+      modelUrl: "/model.ledaweb", tokenizerUrl: "/tokenizer.spartokn",
+    });
+  });
+  const run = async () => {
+    const beforeFirstInit = await count();
+    const first = await initWorker();
+    const afterFirstInit = await count();
+    first.worker.terminate();
+
+    const second = await initWorker();
+    const afterCachedInit = await count();
+    const cacheHits = second.progress.filter((item) => item.fromCache === true).length;
+    const worker = second.worker;
+    let oldTokens = 0;
+    let oldCanceled = false;
+    let newCompleted = false;
+    let activeCanceled = false;
+    let activeCanceledAtEvents = -1;
+    let staleAfterCancellation = false;
+    let responsivenessTicks = 0;
+    let responsivenessTimer;
+    let responsiveCompleted = false;
+    const completion = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("protocol test timed out")), 30000);
+      worker.onmessage = ({ data }) => {
+        events.push(data);
+        if (data.requestId === "old" && data.type === "TOKEN") ++oldTokens;
+        if (data.requestId === "old" && data.type === "CANCELED") oldCanceled = true;
+        if (data.requestId === "new" && data.type === "COMPLETE") {
+          newCompleted = true;
+          worker.postMessage({
+            type: "COMPLETE", requestId: "active", prompt: "The catalytic activity",
+            options: { greedy: true, maxNewTokens: 32 },
+          });
+        }
+        if (data.requestId === "active" && data.type === "TOKEN" && !activeCanceled) {
+          worker.postMessage({ type: "CANCEL", requestId: "active" });
+        } else if (data.requestId === "active" && data.type === "TOKEN" && activeCanceled) {
+          staleAfterCancellation = true;
+        }
+        if (data.requestId === "active" && data.type === "CANCELED") {
+          activeCanceled = true;
+          activeCanceledAtEvents = events.length;
+          responsivenessTimer = setInterval(() => { ++responsivenessTicks; }, 10);
+          worker.postMessage({
+            type: "COMPLETE", requestId: "responsive", prompt: "The equilibrium constant",
+            options: { greedy: true, maxNewTokens: 32 },
+          });
+        }
+        if (data.requestId === "responsive" && data.type === "COMPLETE") {
+          responsiveCompleted = true;
+          clearInterval(responsivenessTimer);
+          clearTimeout(timer);
+          resolve();
+        }
+        if (data.type === "ERROR") reject(new Error(data.message));
+      };
+      worker.postMessage({
+        type: "COMPLETE", requestId: "old", prompt: "Activation of CD8+ T cells",
+        options: { greedy: true, maxNewTokens: 32 },
+      });
+      worker.postMessage({
+        type: "COMPLETE", requestId: "new", prompt: "In aqueous solution",
+        options: { greedy: true, maxNewTokens: 2 },
+      });
+    });
+    await completion;
+    const afterInference = await count();
+    worker.terminate();
+    const immutableAfterFirstInit = immutableRequests(afterFirstInit);
+    const immutableAfterCachedInit = immutableRequests(afterCachedInit);
+    const immutableAfterInference = immutableRequests(afterInference);
+    const ok = cacheHits >= 2 && immutableAfterCachedInit === immutableAfterFirstInit &&
+      oldCanceled && oldTokens === 0 && newCompleted && activeCanceled &&
+      !staleAfterCancellation && responsiveCompleted && responsivenessTicks >= 5 &&
+      immutableAfterInference === immutableAfterCachedInit;
+    return {
+      ok,
+      beforeFirstInit,
+      afterFirstInit,
+      afterCachedInit,
+      afterInference,
+      immutableAfterFirstInit,
+      immutableAfterCachedInit,
+      immutableAfterInference,
+      cacheHits,
+      oldCanceled,
+      oldTokens,
+      newCompleted,
+      activeCanceled,
+      activeCanceledAtEvents,
+      staleAfterCancellation,
+      responsiveCompleted,
+      responsivenessTicks,
+    };
+  };
+  run().then((value) => {
+    result.textContent = JSON.stringify(value, null, 2);
+    document.title = value.ok ? "PASS" : "FAIL";
+  }).catch((error) => {
+    result.textContent = JSON.stringify({ ok: false, message: error.message, stack: error.stack }, null, 2);
+    document.title = "FAIL";
+  });
+</script>
