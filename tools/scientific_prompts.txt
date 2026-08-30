@@ -1,24 +1,43 @@
-Activation of naïve CD8+ T cells requires
-The differentiation of B cells into plasma cells is regulated by
-In chronic inflammation, macrophage polarization can
-The catalytic activity of the enzyme depends on
-Protein folding in the endoplasmic reticulum is assisted by
-The observed mutation alters receptor binding because
-Single-cell RNA sequencing revealed that the population
-During mitosis, chromosome segregation is controlled by
-In aqueous solution, the equilibrium constant
-The reaction rate increases with temperature because
-Coordination of the metal ion changes the ligand
-The polymerization mechanism proceeds through
-At low temperatures, the heat capacity of the solid
-The wave function evolves according to
-The measured magnetic susceptibility indicates
-In general relativity, spacetime curvature is related to
-For a differentiable function, the gradient points toward
-The numerical method converges when
-The convolutional neural network was trained using
-The asymptotic complexity of the algorithm is determined by
-In a feedback control system, stability requires
-The finite-element mesh was refined near
-Measurement uncertainty was propagated by
-The experimental results support the hypothesis that
+category	prompt
+immunology_biomedical	Activation of naïve CD8+ T cells requires
+immunology_biomedical	The differentiation of B cells into plasma cells is regulated by
+immunology_biomedical	In chronic inflammation, macrophage polarization can
+immunology_biomedical	A successful vaccine response depends on
+immunology_biomedical	The clinical phenotype is consistent with
+immunology_biomedical	Resistance to the antimicrobial treatment emerged when
+molecular_biology	The catalytic activity of the enzyme depends on
+molecular_biology	Protein folding in the endoplasmic reticulum is assisted by
+molecular_biology	The observed mutation alters receptor binding because
+molecular_biology	Single-cell RNA sequencing revealed that the population
+molecular_biology	During mitosis, chromosome segregation is controlled by
+molecular_biology	Transcription of the target gene increases after
+chemistry	In aqueous solution, the equilibrium constant
+chemistry	The reaction rate increases with temperature because
+chemistry	Coordination of the metal ion changes the ligand
+chemistry	The polymerization mechanism proceeds through
+chemistry	The NMR spectrum indicates that the compound
+chemistry	Under acidic conditions, the intermediate undergoes
+physics	At low temperatures, the heat capacity of the solid
+physics	The wave function evolves according to
+physics	The measured magnetic susceptibility indicates
+physics	In general relativity, spacetime curvature is related to
+physics	When a photon interacts with matter,
+physics	The boundary conditions determine the allowed modes by
+mathematics	For a differentiable function, the gradient points toward
+mathematics	The eigenvalues of a symmetric matrix are
+mathematics	The numerical method converges when
+mathematics	By applying the divergence theorem, the integral
+mathematics	The probability distribution approaches a Gaussian as
+mathematics	A sufficient condition for the sequence to converge is
+cs_ml	The convolutional neural network was trained using
+cs_ml	The asymptotic complexity of the algorithm is determined by
+cs_ml	The language model assigns probability to the next token by
+cs_ml	Regularization improves generalization when
+cs_ml	The distributed system remains consistent provided that
+cs_ml	Gradient descent reaches a stationary point if
+scientific_explanation	In a feedback control system, stability requires
+scientific_explanation	The finite-element mesh was refined near
+scientific_explanation	Measurement uncertainty was propagated by
+scientific_explanation	The experimental results support the hypothesis that
+scientific_explanation	To distinguish correlation from causation, the analysis
+scientific_explanation	The discrepancy between theory and observation may arise from

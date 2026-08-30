@@ -1,0 +1,6 @@
+name	greedy	temperature	top_k	top_p
+greedy	1	-	-	-
+t06_p090_k50	0	0.6	50	0.90
+t07_p090_k50	0	0.7	50	0.90
+t08_p090_k50	0	0.8	50	0.90
+t07_p095_k50	0	0.7	50	0.95

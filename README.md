@@ -63,4 +63,9 @@ Use `--greedy` for argmax decoding and `--device cuda` on a CUDA-enabled Spar bu
 completion must fit within 512 tokens; the tool never truncates silently. Generated raw bytes are
 streamed without splitting valid UTF-8 code points, and EOD is never passed to tokenizer decoding.
 
+The frozen public autocomplete default is temperature `0.7`, top-k `50`, top-p `0.90`, and 32 new
+tokens. It was selected on validation diagnostics; greedy decoding remains available but is not the
+default because it repeats pathologically. See [the Phase-33 evaluation protocol](docs/phase33_evaluation.md)
+for the exact metric and TEST-freeze procedure.
+
 Current work is local C++ inference and evaluation. There is no website or serving API yet.
